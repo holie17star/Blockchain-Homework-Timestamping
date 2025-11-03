@@ -7,6 +7,9 @@
 (define-constant err-not-student (err u105))
 (define-constant err-duplicate-submission (err u106))
 (define-constant err-invalid-hash (err u107))
+(define-constant err-extension-exists (err u108))
+(define-constant err-no-extension (err u109))
+(define-constant err-extension-resolved (err u110))
 
 (define-data-var assignment-counter uint u0)
 
@@ -75,6 +78,18 @@
 )
 
 (define-data-var plagiarism-report-counter uint u0)
+
+(define-map extension-requests
+  { assignment-id: uint, student-address: principal }
+  {
+    reason: (string-ascii 200),
+    requested-blocks: uint,
+    requested-at: uint,
+    status: (string-ascii 10),
+    reviewed-at: (optional uint),
+    reviewed-by: (optional principal)
+  }
+)
 
 (define-public (register-instructor (name (string-ascii 50)) (department (string-ascii 50)))
   (let ((instructor-data {
@@ -290,4 +305,71 @@
     submission-info
     (not (get plagiarism-flag submission-info))
     true)
+)
+
+(define-public (request-extension
+  (assignment-id uint)
+  (reason (string-ascii 200))
+  (requested-blocks uint))
+  (let ((assignment-opt (map-get? assignments { assignment-id: assignment-id }))
+        (student-opt (map-get? students { student-address: tx-sender }))
+        (existing-request (map-get? extension-requests { assignment-id: assignment-id, student-address: tx-sender })))
+    (match assignment-opt
+      assignment-info
+      (match student-opt
+        student-info
+        (if (get active student-info)
+          (if (get active assignment-info)
+            (if (is-none existing-request)
+              (let ((request-data {
+                reason: reason,
+                requested-blocks: requested-blocks,
+                requested-at: stacks-block-height,
+                status: "pending",
+                reviewed-at: none,
+                reviewed-by: none
+              }))
+              (ok (map-set extension-requests { assignment-id: assignment-id, student-address: tx-sender } request-data)))
+              err-extension-exists)
+            err-invalid-assignment)
+          err-not-student)
+        err-not-student)
+      err-invalid-assignment))
+)
+
+(define-public (review-extension
+  (assignment-id uint)
+  (student-address principal)
+  (approve bool))
+  (let ((assignment-opt (map-get? assignments { assignment-id: assignment-id }))
+        (request-opt (map-get? extension-requests { assignment-id: assignment-id, student-address: student-address })))
+    (match assignment-opt
+      assignment-info
+      (if (is-eq tx-sender (get instructor assignment-info))
+        (match request-opt
+          request-info
+          (if (is-eq (get status request-info) "pending")
+            (let ((new-status (if approve "approved" "rejected"))
+                  (updated-request (merge request-info {
+                    status: new-status,
+                    reviewed-at: (some stacks-block-height),
+                    reviewed-by: (some tx-sender)
+                  })))
+              (begin
+                (map-set extension-requests { assignment-id: assignment-id, student-address: student-address } updated-request)
+                (if approve
+                  (let ((new-deadline (+ (get deadline-block assignment-info) (get requested-blocks request-info)))
+                        (updated-assignment (merge assignment-info { deadline-block: new-deadline })))
+                    (ok (map-set assignments { assignment-id: assignment-id } updated-assignment)))
+                  (ok true))))
+            err-extension-resolved)
+          err-no-extension)
+        err-owner-only)
+      err-invalid-assignment))
+)
+
+(define-read-only (get-extension-request
+  (assignment-id uint)
+  (student-address principal))
+  (map-get? extension-requests { assignment-id: assignment-id, student-address: student-address })
 )
